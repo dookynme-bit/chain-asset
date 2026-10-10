@@ -506,7 +506,7 @@ def inspect():
     if not re.fullmatch(r'asset-review-[1-9][0-9]*-[1-9][0-9]*', session):
         raise Failure('Specify an existing asset-review session ID from trusted recovery state.')
     url = validate_hook(os.environ.get('HAST_AGENT_URL', ''))
-    counts, last, result, hints = Counter(), None, FinalResult(), set()
+    counts, last, result, hints, reports = Counter(), None, FinalResult(), set(), {}
     deadline = time.monotonic() + 20
     try:
         with hook(url, 'sse', {'session_id': session, 'after_event_id': 0}, 30) as response:
@@ -522,6 +522,8 @@ def inspect():
                 if kind not in {'message.delta', 'reasoning.delta', 'tool.updated'}:
                     last = kind
                 data = value.get('data') or {}
+                if kind == 'message.completed' and data.get('role') == 'assistant':
+                    reports[(value.get('run_id'), data.get('message_id'))] = data.get('text') or ''
                 # Emit classifications only. No event messages, prompts, tool
                 # arguments/outputs, credentials or credential-bearing URLs.
                 if kind in {'message.completed', 'tool.completed', 'error', 'warning'}:
@@ -538,12 +540,24 @@ def inspect():
                     summary('Terminal event: ' + kind)
                     if final and final.get('outcome') in {'needs-info', 'draft-pr', 'would-need-info', 'would-draft-pr', 'skipped', 'blocked'}:
                         summary('Final assistant outcome: ' + final['outcome'])
+                    if os.environ.get('REVIEW_SHOW_REPORT') == 'true':
+                        report = reports.get((value.get('run_id'), data.get('final_message_id')), '')
+                        summary('Final assistant report (URLs and credential-like identifiers redacted):\n' + redacted_report(report))
                     break
     except (Failure, OSError, http.client.HTTPException):
         pass
     summary('Observed event counts: ' + canonical(dict(counts)))
     summary('Last durable event type: ' + (last or 'none'))
     summary('Diagnostic categories: ' + canonical(sorted(hints)))
+
+
+def redacted_report(value):
+    text = str(value)
+    text = re.sub(r'https?://\S+', '[URL omitted]', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+', '[credential omitted]', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b[A-Za-z0-9_+/=-]{32,}\b', '[identifier omitted]', text)
+    text = re.sub(r'(?im)^.*(?:authorization|bearer\s|token\s*[:=]|secret\s*[:=]).*$', '[credential line omitted]', text)
+    return text[:10000]
 
 
 if __name__ == '__main__':

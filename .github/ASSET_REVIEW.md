@@ -86,4 +86,7 @@ comments are suppressed. Disable `ASSET_REVIEW_ENABLED` for maintenance.
 For a long-running session, run **Inspect Asset review session** with the session
 ID from the recovery artifact. It observes that existing SSE stream only and
 prints event counts and diagnostic categories. It does not dispatch another
-review, print message/tool contents or change session state.
+review or change session state. `show_report=true` optionally shows only the
+completed run's final assistant report, with URLs, credential-shaped values,
+long unbroken identifiers and credential-bearing lines redacted. Tool contents
+are never printed.
