@@ -7,6 +7,10 @@ on:
         description: Existing asset-review session ID from the recovery artifact
         type: string
         required: true
+      show_report:
+        description: Show final assistant report with URLs and credential-like values redacted
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,4 +29,5 @@ jobs:
         env:
           HAST_AGENT_URL: ${{ secrets.HAST_ASSET_AGENT_HOOK_URL }}
           REVIEW_SESSION_ID: ${{ inputs.session_id }}
+          REVIEW_SHOW_REPORT: ${{ inputs.show_report }}
         run: python3 scripts/asset_review.py inspect

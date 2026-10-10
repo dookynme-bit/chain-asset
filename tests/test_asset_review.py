@@ -96,6 +96,13 @@ class TriggerTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_operator_report_redacts_urls_credentials_and_unbroken_identifiers(self):
+        secret = 'github_pat_' + 'x' * 70
+        value = 'Blocked: missing permission.\nhttps://aip.hast.so/call?secret=abc\n' + secret + '\n' + 'y' * 40 + '\nAuthorization: Bearer short-secret'
+        output = review.redacted_report(value)
+        self.assertIn('Blocked: missing permission.', output)
+        for sensitive in (secret, 'y' * 40, 'short-secret', 'secret=abc'):
+            self.assertNotIn(sensitive, output)
     def test_sse_connection_loss_resumes_same_session_without_new_message(self):
         # The SSE iterator yields lines rather than entire frames.
         def broken_lines():
