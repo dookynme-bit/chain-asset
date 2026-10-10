@@ -11,6 +11,12 @@ body:
         **Review Process**: Subscan team will review your submission within 3-5 business days.
         After approval, updates will be reflected on Subscan within 2-3 business days.
 
+        Automated review verifies on-chain identity, official project sources, links and logo safety.
+        Only the Issue creator can request an automatic re-review: edit the original submission,
+        or add a comment with `/asset-review` on its own line after providing corrections.
+        Requests for the same Issue are limited to one review per 30 minutes. Ordinary replies
+        do not trigger the Agent. A successful review creates a draft PR for maintainer review.
+
   - type: input
     id: subscan-link
     attributes:
