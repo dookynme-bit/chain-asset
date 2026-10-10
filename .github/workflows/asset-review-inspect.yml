@@ -1,0 +1,28 @@
+name: Inspect Asset review session
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_id:
+        description: Existing asset-review session ID from the recovery artifact
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.repository == 'subscan-explorer/chain-asset' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    environment: chain-assets
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Observe existing run without dispatching work
+        env:
+          HAST_AGENT_URL: ${{ secrets.HAST_ASSET_AGENT_HOOK_URL }}
+          REVIEW_SESSION_ID: ${{ inputs.session_id }}
+        run: python3 scripts/asset_review.py inspect
