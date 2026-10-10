@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+from collections import Counter
 from pathlib import Path
 import re
 import socket
@@ -487,9 +488,55 @@ def execute():
         (state_path().parent / 'diagnostics.json').write_text(json.dumps(diagnostics, indent=2) + '\n')
 
 
+def inspect():
+    """Observe one existing session; never send a new message or print its text."""
+    session = os.environ.get('REVIEW_SESSION_ID', '')
+    if not re.fullmatch(r'asset-review-[1-9][0-9]*-[1-9][0-9]*', session):
+        raise Failure('Specify an existing asset-review session ID from trusted recovery state.')
+    url = validate_hook(os.environ.get('HAST_AGENT_URL', ''))
+    counts, last, result, hints = Counter(), None, FinalResult(), set()
+    deadline = time.monotonic() + 20
+    try:
+        with hook(url, 'sse', {'session_id': session, 'after_event_id': 0}, 30) as response:
+            for frame in sse_frames(response, deadline):
+                try:
+                    value = json.loads(frame['data'])
+                except ValueError:
+                    continue
+                kind = value.get('type', frame['event'])
+                if not re.fullmatch(r'[a-z]+\.[a-z]+', kind):
+                    continue
+                counts[kind] += 1
+                if kind not in {'message.delta', 'reasoning.delta', 'tool.updated'}:
+                    last = kind
+                data = value.get('data') or {}
+                # Emit classifications only. No event messages, prompts, tool
+                # arguments/outputs, credentials or credential-bearing URLs.
+                if kind in {'message.completed', 'tool.completed', 'error', 'warning'}:
+                    contents = canonical(data).lower()
+                    patterns = {'auth-failure': r'\b(?:401|unauthorized|bad credentials)\b',
+                                'permission-failure': r'\b(?:403|forbidden|permission denied)\b',
+                                'rate-limit': r'\b(?:429|rate limit)\b',
+                                'deduplication': r'already.reviewed|duplicate|unchanged|去重|已审核',
+                                'eligibility': r'not.eligible|ineligible|不符合|不适用',
+                                'verification-incomplete': r'unverified|cannot.verify|未验证|无法核实'}
+                    hints.update(label for label, pattern in patterns.items() if re.search(pattern, contents))
+                final = result.accept(value, kind)
+                if kind in TERMINAL:
+                    summary('Terminal event: ' + kind)
+                    if final and final.get('outcome') in {'needs-info', 'draft-pr', 'would-need-info', 'would-draft-pr', 'skipped', 'blocked'}:
+                        summary('Final assistant outcome: ' + final['outcome'])
+                    break
+    except (Failure, TimeoutError, socket.timeout):
+        pass
+    summary('Observed event counts: ' + canonical(dict(counts)))
+    summary('Last durable event type: ' + (last or 'none'))
+    summary('Diagnostic categories: ' + canonical(sorted(hints)))
+
+
 if __name__ == '__main__':
     try:
-        {'prepare': prepare, 'execute': execute}[sys.argv[1]]()
+        {'prepare': prepare, 'execute': execute, 'inspect': inspect}[sys.argv[1]]()
     except Failure as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(1)

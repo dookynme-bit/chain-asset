@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import os
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -91,6 +92,22 @@ class TriggerTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_inspection_reads_only_existing_session_and_never_prints_message_text(self):
+        frames = [b'event: message.completed\n',
+                  b'data: {"type":"message.completed","run_id":"r","data":{"role":"user","message_id":"m","text":"401 private-message github_pat_sensitive"}}\n', b'\n',
+                  b'event: run.completed\n',
+                  b'data: {"type":"run.completed","run_id":"r","data":{"final_message_id":"m"}}\n', b'\n']
+        with patch.dict(os.environ, {'REVIEW_SESSION_ID': 'asset-review-9-123', 'HAST_AGENT_URL': 'https://aip.hast.so/api/call?secret=abc'}), patch.object(review, 'hook') as hook, patch.object(review, 'summary') as summary:
+            hook.return_value.__enter__.return_value = frames
+            review.inspect()
+            self.assertEqual(hook.call_count, 1)
+            self.assertEqual(hook.call_args.args[1], 'sse')
+            output = str(summary.call_args_list)
+            self.assertIn('auth-failure', output)
+            self.assertNotIn('private-message', output)
+            self.assertNotIn('github_pat_sensitive', output)
+            self.assertNotIn('secret=abc', output)
+
     def test_sse_keepalive_multiline_and_durable_id(self):
         lines = [b': keepalive\n', b'\n', b'id: 42\n', b'event: run.completed\n',
                  b'data: {"type":\n', b'data: "run.completed"}\n', b'\n']

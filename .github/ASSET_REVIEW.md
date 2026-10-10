@@ -79,3 +79,8 @@ outcome URLs. `asset-review-diagnostics` contains only event types and field nam
 A blocked or failed result is not acceptance. Inspect its safe error and correct
 the dependency or reviewer behavior before manually retrying; repeated automatic
 comments are suppressed. Disable `ASSET_REVIEW_ENABLED` for maintenance.
+
+For a long-running session, run **Inspect Asset review session** with the session
+ID from the recovery artifact. It observes that existing SSE stream only and
+prints event counts and diagnostic categories. It does not dispatch another
+review, print message/tool contents or change session state.
