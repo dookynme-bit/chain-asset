@@ -6,6 +6,7 @@ scoped Hast Agent. State artifacts contain no hook URL, token or issue text.
 """
 import datetime as dt
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -436,16 +437,27 @@ def execute():
     payload = plan.get('payload') or request_payload(plan)
     final = FinalResult()
     diagnostics, result, terminal, after = [], None, None, 0
-    deadline = time.monotonic() + (180 if plan.get('connectivity_check') else 1800)
+    budget = 180 if plan.get('connectivity_check') else 1800
+    remaining = max(0, budget - (time.time() - timestamp(plan['started_at'])))
+    deadline, stop_deadline = time.monotonic() + remaining, None
     try:
         # Same session/request/content on recovery; never create a second run on a timeout.
         with hook(url, 'created', payload) as response:
             response.read(MAX_BYTES)
-        while time.monotonic() < deadline and terminal is None:
+        while terminal is None:
+            if stop_deadline is None and (time.monotonic() >= deadline or plan.get('input_requested')):
+                with hook(url, 'prompted', {'session_id': plan['session_id'], 'signal': 'stop'}) as response:
+                    response.read(MAX_BYTES)
+                plan['stop_requested'] = True
+                stop_deadline = time.monotonic() + 120
+                summary('Stop requested: review deadline reached or Agent requires operator input; awaiting terminal acknowledgement.')
+            active_deadline = stop_deadline or deadline
+            if time.monotonic() >= active_deadline:
+                break
             try:
                 with hook(url, 'sse', {'session_id': plan['session_id'], 'after_event_id': after}, 60) as response:
-                    for frame in sse_frames(response, deadline):
-                        if time.monotonic() > deadline:
+                    for frame in sse_frames(response, active_deadline):
+                        if time.monotonic() > active_deadline:
                             break
                         if frame['id'].isdigit():
                             after = max(after, int(frame['id']))
@@ -460,16 +472,16 @@ def execute():
                                             'data_keys': sorted(details) if isinstance(details, dict) else []})
                         diagnostics = diagnostics[-100:]
                         result = final.accept(value, kind) or result
+                        if kind == 'input.requested' and stop_deadline is None:
+                            plan['input_requested'] = True
+                            break
                         if kind in TERMINAL:
                             terminal = kind
                             break
-            except (Failure, TimeoutError, socket.timeout):
+            except (Failure, OSError, http.client.HTTPException):
                 # SSE reconnects continue from the last durable sequence; no new prompt.
                 time.sleep(2)
         if terminal != 'run.completed':
-            if terminal is None:
-                with hook(url, 'prompted', {'session_id': plan['session_id'], 'signal': 'stop'}) as response:
-                    response.read(MAX_BYTES)
             raise Failure(f'Agent terminal result: {terminal or "unconfirmed; stop requested"}. Session recovery is required.')
         verified = verify_result(result, plan, reviewer)
         plan.update(status='completed', completed_at=now(), result=verified)
@@ -527,7 +539,7 @@ def inspect():
                     if final and final.get('outcome') in {'needs-info', 'draft-pr', 'would-need-info', 'would-draft-pr', 'skipped', 'blocked'}:
                         summary('Final assistant outcome: ' + final['outcome'])
                     break
-    except (Failure, TimeoutError, socket.timeout):
+    except (Failure, OSError, http.client.HTTPException):
         pass
     summary('Observed event counts: ' + canonical(dict(counts)))
     summary('Last durable event type: ' + (last or 'none'))

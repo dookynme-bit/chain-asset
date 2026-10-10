@@ -71,8 +71,11 @@ Recovery state is uploaded before the hook request and after the run. It contain
 the exact credential-free payload, stable session/request IDs, fingerprint and
 outcome; no token, hook URL or submitted Issue text. A later dispatch recovers
 an unfinished session before starting another Issue, with the same payload.
-SSE reconnects resume from the last durable event sequence. A 30-minute review
-deadline requests a stop, and an unconfirmed stop retains the pending lock.
+SSE reconnects resume from the last durable event sequence, including prematurely
+closed HTTP streams. A 30-minute review deadline includes recovery time and
+requests a stop; it is not reset by another workflow. The client waits up to two
+minutes for a terminal stop acknowledgement. An unconfirmed stop retains the
+pending lock. Operator input requests also stop unattended execution.
 
 Use the Actions summary and `asset-review-state` artifact for verified public
 outcome URLs. `asset-review-diagnostics` contains only event types and field names.

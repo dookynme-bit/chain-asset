@@ -1,9 +1,13 @@
 import copy
 import importlib.util
 import os
+import http.client
+import io
+import json
+import tempfile
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 spec = importlib.util.spec_from_file_location('asset_review', Path(__file__).parents[1] / 'scripts' / 'asset_review.py')
 review = importlib.util.module_from_spec(spec)
@@ -92,6 +96,59 @@ class TriggerTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_sse_connection_loss_resumes_same_session_without_new_message(self):
+        # The SSE iterator yields lines rather than entire frames.
+        def broken_lines():
+            yield from b'id: 1\nevent: run.started\ndata: {"type":"run.started","data":{}}\n\n'.splitlines(keepends=True)
+            raise http.client.IncompleteRead(b'', 1)
+
+        final = ('id: 2\nevent: message.completed\ndata: '
+                 '{"type":"message.completed","run_id":"r","data":{"role":"assistant","message_id":"m","text":'
+                 '"ASSET_REVIEW_RESULT {\\"issue_number\\":9,\\"outcome\\":\\"skipped\\"}"}}\n\n'
+                 'id: 3\nevent: run.completed\ndata: {"type":"run.completed","run_id":"r","data":{"final_message_id":"m"}}\n\n')
+        streams = iter([broken_lines(), final.encode().splitlines(keepends=True)])
+        calls = []
+
+        def fake_hook(url, action, payload, timeout=30):
+            calls.append((action, payload))
+            context = MagicMock()
+            context.__enter__.return_value = io.BytesIO(b'{}') if action == 'created' else next(streams)
+            return context
+
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'REVIEW_STATE_DIR': folder,
+                'HAST_AGENT_URL': 'https://aip.hast.so/api/call?secret=abc', 'REVIEWER_LOGIN': 'reviewer'}):
+            plan = {'issue_number': 9, 'dry_run': True, 'connectivity_check': True, 'fingerprint': 'f',
+                    'status': 'pending', 'started_at': review.now(), 'session_id': 's', 'request_id': 'q', 'run_id': '1'}
+            plan['payload'] = review.request_payload(plan)
+            review.save_state({'issues': {'9': plan}})
+            (Path(folder) / 'plan.json').write_text(json.dumps(plan))
+            with patch.object(review, 'hook', side_effect=fake_hook), patch.object(review.time, 'sleep'), patch.object(review, 'summary'):
+                review.execute()
+            self.assertEqual(json.loads((Path(folder) / 'state.json').read_text())['issues']['9']['status'], 'completed')
+        self.assertEqual([action for action, _ in calls], ['created', 'sse', 'sse'])
+        self.assertEqual(calls[2][1]['after_event_id'], 1)
+
+    def test_recovery_does_not_reset_review_deadline_and_waits_for_stop_ack(self):
+        calls = []
+        def fake_hook(url, action, payload, timeout=30):
+            calls.append(action)
+            context = MagicMock()
+            context.__enter__.return_value = (b'id: 1\nevent: run.interrupted\ndata: {"type":"run.interrupted","data":{}}\n\n'.splitlines(keepends=True)
+                                             if action == 'sse' else io.BytesIO(b'{}'))
+            return context
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'REVIEW_STATE_DIR': folder,
+                'HAST_AGENT_URL': 'https://aip.hast.so/api/call?secret=abc', 'REVIEWER_LOGIN': 'reviewer'}):
+            plan = {'issue_number': 9, 'dry_run': True, 'fingerprint': 'f', 'status': 'pending',
+                    'started_at': '2000-01-01T00:00:00Z', 'session_id': 's', 'request_id': 'q', 'run_id': '1'}
+            review.save_state({'issues': {'9': plan}})
+            (Path(folder) / 'plan.json').write_text(json.dumps(plan))
+            with patch.object(review, 'hook', side_effect=fake_hook), patch.object(review, 'summary'), self.assertRaises(review.Failure):
+                review.execute()
+            record = json.loads((Path(folder) / 'state.json').read_text())['issues']['9']
+            self.assertTrue(record['stop_requested'])
+            self.assertEqual(record['status'], 'completed')
+        self.assertEqual(calls, ['created', 'prompted', 'sse'])
+
     def test_inspection_reads_only_existing_session_and_never_prints_message_text(self):
         frames = [b'event: message.completed\n',
                   b'data: {"type":"message.completed","run_id":"r","data":{"role":"user","message_id":"m","text":"401 private-message github_pat_sensitive"}}\n', b'\n',
