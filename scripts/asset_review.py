@@ -98,12 +98,14 @@ def owner_event(event, event_name, reviewer):
     issue, sender = event.get('issue', {}), event.get('sender', {})
     owner = issue.get('user', {})
     if (not owner.get('id') or sender.get('id') != owner['id'] or
-            sender.get('type') == 'Bot' or sender.get('login') == reviewer or
+            sender.get('type') == 'Bot' or
             issue.get('pull_request')):
         return False
     if event_name == 'issue_comment':
         comment = event.get('comment', {})
         return (comment.get('user', {}).get('id') == owner['id'] and
+                not (comment.get('user', {}).get('login') == reviewer and
+                     MARKER in (comment.get('body') or '')) and
                 bool(COMMAND.search(comment.get('body') or '')))
     return event_name == 'issues' and event.get('action') in {'opened', 'edited', 'reopened'}
 
@@ -122,10 +124,11 @@ def fingerprint(issue, comments, reviewer):
     return hashlib.sha256(canonical(data).encode()).hexdigest()
 
 
-def should_dispatch(record, digest, current_time, cooldown, force=False):
+def should_dispatch(record, digest, current_time, cooldown, force=False, dry_run=False):
     if force:
         return True
-    if record and record.get('fingerprint') == digest and record.get('status') == 'completed':
+    if (record and record.get('fingerprint') == digest and record.get('status') == 'completed'
+            and (dry_run or not record.get('dry_run'))):
         return False
     if record and current_time - timestamp(record['started_at']) < cooldown:
         return False
@@ -238,14 +241,17 @@ def prepare():
             if probe:
                 digest = 'probe:' + digest
             old = state['issues'].get(str(issue['number']))
-            if not should_dispatch(old, digest, time.time(), int(os.environ.get('REVIEW_COOLDOWN_SECONDS', '1800')), force):
+            if not should_dispatch(old, digest, time.time(), int(os.environ.get('REVIEW_COOLDOWN_SECONDS', '1800')), force, dry_run):
                 continue
             run_id = os.environ['GITHUB_RUN_ID']
             plan = {'issue_number': issue['number'], 'fingerprint': digest,
                     'started_at': now(), 'status': 'pending', 'dry_run': dry_run,
-                    'connectivity_check': probe,
+                    'connectivity_check': probe, 'force': force,
                     'session_id': f'asset-review-{issue["number"]}-{run_id}',
                     'request_id': f'asset-review-{run_id}', 'run_id': run_id}
+            # Persist exact non-secret content before dispatch. Code changes on
+            # recovery cannot change the payload for this idempotency key.
+            plan['payload'] = request_payload(plan)
             state['issues'][str(issue['number'])] = plan
             break
         if plan is None:
@@ -319,6 +325,28 @@ def extract_result(value):
     return None
 
 
+class FinalResult:
+    """Only the final assistant message of the completed run is authoritative."""
+
+    def __init__(self):
+        self.messages = {}
+
+    def accept(self, value, kind):
+        if not isinstance(value, dict):
+            return None
+        details = value.get('data') or {}
+        if not isinstance(details, dict):
+            return None
+        run_id = value.get('run_id')
+        if kind == 'message.completed' and details.get('role') == 'assistant':
+            message_id = details.get('message_id')
+            if run_id and message_id:
+                self.messages[(run_id, message_id)] = extract_result(details.get('text'))
+        if kind == 'run.completed':
+            return self.messages.get((run_id, details.get('final_message_id')))
+        return None
+
+
 def verify_result(result, plan, reviewer):
     if not isinstance(result, dict) or result.get('issue_number') != plan['issue_number']:
         raise Failure('Agent ended without the structured result for the requested Issue.')
@@ -353,11 +381,7 @@ def verify_result(result, plan, reviewer):
     return {key: result[key] for key in ('issue_number', 'outcome', 'comment_url', 'pr_url') if key in result}
 
 
-def execute():
-    url = validate_hook(os.environ.get('HAST_AGENT_URL', ''))
-    state = json.loads(state_path().read_text())
-    plan = json.loads((state_path().parent / 'plan.json').read_text())
-    reviewer = os.environ['REVIEWER_LOGIN']
+def request_payload(plan):
     number = plan['issue_number']
     prompt = (f'Review https://github.com/{REPO}/issues/{number}. dry_run={str(plan["dry_run"]).lower()}. '
               'This dispatch was authenticated by GitHub: only Issue owner edits or an owner /asset-review request '
@@ -375,9 +399,24 @@ def execute():
         prompt = (f'dry_run=true. This is a hook connectivity check, not an Asset review. Do not invoke tools, '
                   f'do not read credentials or write to GitHub. Reply with exactly this one plain line and stop: '
                   f'ASSET_REVIEW_RESULT {{"issue_number":{number},"outcome":"skipped","comment_url":null,"pr_url":null}}')
-    payload = {'session_id': plan['session_id'], 'request_id': plan['request_id'], 'prompt': prompt,
+    elif plan.get('force'):
+        prompt += (' This authenticated maintainer dispatch explicitly overrides cooldown and previous-input '
+                   'deduplication for this one review. All provenance, scam, safety and build gates still apply. '
+                   'Reuse an existing matching draft PR; never duplicate a previously published identical reply.')
+    return {'session_id': plan['session_id'], 'request_id': plan['request_id'], 'prompt': prompt,
                'context': {'source': 'github-actions', 'repository': REPO, 'issue_number': number,
                            'trigger_fingerprint': plan['fingerprint'], 'run_id': plan['run_id']}}
+
+
+def execute():
+    url = validate_hook(os.environ.get('HAST_AGENT_URL', ''))
+    state = json.loads(state_path().read_text())
+    plan = json.loads((state_path().parent / 'plan.json').read_text())
+    reviewer = os.environ['REVIEWER_LOGIN']
+    number = plan['issue_number']
+    # Legacy records rebuild the original payload, new records reuse exact content.
+    payload = plan.get('payload') or request_payload(plan)
+    final = FinalResult()
     diagnostics, result, terminal, after = [], None, None, 0
     deadline = time.monotonic() + (180 if plan.get('connectivity_check') else 1800)
     try:
@@ -402,7 +441,7 @@ def execute():
                                             'keys': sorted(value) if isinstance(value, dict) else [],
                                             'data_keys': sorted(details) if isinstance(details, dict) else []})
                         diagnostics = diagnostics[-100:]
-                        result = extract_result(value) or result
+                        result = final.accept(value, kind) or result
                         if kind in TERMINAL:
                             terminal = kind
                             break
