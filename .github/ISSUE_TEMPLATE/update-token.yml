@@ -8,6 +8,11 @@ body:
       value: |
         Use this template to update existing token information in the repository.
 
+        Only the Issue creator can request an automatic re-review: edit the original submission,
+        or add a comment with `/asset-review` on its own line after providing corrections.
+        Requests for the same Issue are limited to one review per 30 minutes. Ordinary replies
+        do not trigger the Agent. All submitted changes must match official project sources.
+
   - type: input
     id: subscan-link
     attributes:

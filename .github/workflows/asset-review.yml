@@ -1,0 +1,100 @@
+name: Asset request review
+run-name: Asset review · ${{ github.event_name }} · issue ${{ github.event.issue.number || inputs.issue_number || 'backlog' }}
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created, edited]
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number (empty scans the pending backlog)
+        type: string
+        required: false
+      dry_run:
+        description: Verify without posting comments or creating an Asset PR
+        type: boolean
+        default: true
+      force:
+        description: Maintainer override of cooldown and completed-input deduplication
+        type: boolean
+        default: false
+      connectivity_check:
+        description: Check hook completion only; always read-only, does not review the Asset
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: read
+  actions: read
+
+# Hold the lock until the Agent has stopped, not just until HTTP acceptance.
+# An hourly scan recovers owner edits whose pending event run was superseded.
+concurrency:
+  group: chain-asset-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    if: >-
+      github.repository == 'subscan-explorer/chain-asset' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' || vars.ASSET_REVIEW_ENABLED == 'true') &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+       (!github.event.issue.pull_request && github.event.sender.type != 'Bot' &&
+        github.event.sender.id == github.event.issue.user.id &&
+        github.event.sender.login != vars.CHAIN_ASSET_AGENT_LOGIN &&
+        (github.event_name != 'issue_comment' ||
+         github.event.comment.user.id == github.event.issue.user.id)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: chain-assets
+    env:
+      GH_READ_TOKEN: ${{ github.token }}
+      REVIEWER_LOGIN: ${{ vars.CHAIN_ASSET_AGENT_LOGIN }}
+      REVIEW_COOLDOWN_SECONDS: '1800'
+      REVIEW_STATE_DIR: asset-review-state
+    steps:
+      - name: Check out trusted workflow code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Test trigger gates and event parsing
+        run: python3 -m unittest discover -s tests -p 'test_asset_review.py' -v
+      - name: Resolve current input, cooldown and unfinished runs
+        id: prepare
+        run: python3 scripts/asset_review.py prepare
+      - name: Persist recovery state before sending any request
+        if: steps.prepare.outputs.dispatch == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: asset-review-state
+          path: asset-review-state/state.json
+          retention-days: 90
+          if-no-files-found: error
+      - name: Review and wait for terminal execution status
+        if: steps.prepare.outputs.dispatch == 'true'
+        env:
+          HAST_AGENT_URL: ${{ secrets.HAST_ASSET_AGENT_HOOK_URL }}
+        run: python3 scripts/asset_review.py execute
+      - name: Persist review outcome and safe diagnostics
+        if: always() && steps.prepare.outputs.dispatch == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: asset-review-state
+          path: asset-review-state/state.json
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: error
+      - name: Save safe event diagnostics
+        if: always() && steps.prepare.outputs.dispatch == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: asset-review-diagnostics
+          path: asset-review-state/diagnostics.json
+          retention-days: 14
+          if-no-files-found: ignore
