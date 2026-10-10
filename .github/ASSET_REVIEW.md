@@ -33,7 +33,10 @@ legitimate submissions.
 
 Reviews have a 30-minute per-Issue cooldown and unchanged owner inputs are
 deduplicated. A single global concurrency group waits for actual Agent terminal
-status. GitHub scans the open backlog hourly at minute 17 (UTC); each run handles
+status on eligible jobs only. Ordinary comments, non-owner events and Agent-marked
+replies are filtered before acquiring the lock, so they cannot evict a pending
+owner request. The script additionally requires a standalone command line.
+GitHub scans the open backlog hourly at minute 17 (UTC); each run handles
 at most one pending request, oldest first. Keep the independent Hast schedule
 paused to avoid competing schedulers. GitHub scheduled runs may be delayed.
 

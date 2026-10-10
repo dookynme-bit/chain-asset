@@ -32,12 +32,6 @@ permissions:
   issues: read
   actions: read
 
-# Hold the lock until the Agent has stopped, not just until HTTP acceptance.
-# An hourly scan recovers owner edits whose pending event run was superseded.
-concurrency:
-  group: chain-asset-review
-  cancel-in-progress: false
-
 jobs:
   review:
     if: >-
@@ -48,8 +42,16 @@ jobs:
        (!github.event.issue.pull_request && github.event.sender.type != 'Bot' &&
         github.event.sender.id == github.event.issue.user.id &&
         (github.event_name != 'issue_comment' ||
-         github.event.comment.user.id == github.event.issue.user.id)))
+         (github.event.comment.user.id == github.event.issue.user.id &&
+          contains(github.event.comment.body, '/asset-review') &&
+          !(github.event.sender.login == vars.CHAIN_ASSET_AGENT_LOGIN &&
+            contains(github.event.comment.body, '<!-- chain-asset-review:v1 '))))))
     runs-on: ubuntu-latest
+    # Rejected comments never acquire this lock or evict a pending owner request.
+    # Hold it through terminal status; hourly scans recover superseded owner edits.
+    concurrency:
+      group: chain-asset-review
+      cancel-in-progress: false
     timeout-minutes: 40
     environment: chain-assets
     env:
