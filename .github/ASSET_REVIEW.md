@@ -11,8 +11,8 @@ by the dispatcher, and the built-in GitHub token has read-only permissions.
   not the Agent configuration page. Store it in GitHub Secrets; never log it.
 - Variable `CHAIN_ASSET_AGENT_LOGIN`: the authenticated GitHub account used by
   the Agent, currently `freehere107`.
-- Repository variable `ASSET_REVIEW_ENABLED`: `true` enables automatic events
-  and hourly backlog scans. `false` disables those; manual dispatch remains
+- Repository variable `ASSET_REVIEW_ENABLED`: `true` enables automatic events.
+  `false` disables those; manual dispatch remains
   available for diagnosis. Environment-only variables cannot control the
   pre-job gate, so keep this switch at repository scope.
 
@@ -32,13 +32,19 @@ may share the Agent login; account identity alone does not suppress their
 legitimate submissions.
 
 Reviews have a 30-minute per-Issue cooldown and unchanged owner inputs are
-deduplicated. A single global concurrency group waits for actual Agent terminal
-status on eligible jobs only. Ordinary comments, non-owner events and Agent-marked
-replies are filtered before acquiring the lock, so they cannot evict a pending
-owner request. The script additionally requires a standalone command line.
-GitHub scans the open backlog hourly at minute 17 (UTC); each run handles
-at most one pending request, oldest first. Keep the independent Hast schedule
-paused to avoid competing schedulers. GitHub scheduled runs may be delayed.
+deduplicated. Changed automatic requests wait for the cooldown to end, without
+calling the Agent while waiting. The latest Issue and comments are read again
+before dispatch, so rapid edits coalesce and closing an Issue cancels its review.
+This wait can consume up to 30 minutes of GitHub runner time and delay other
+queued Issues, but does not consume model tokens.
+
+A single global concurrency group waits for actual Agent terminal status on
+eligible jobs only. `queue: max` preserves up to 100 pending jobs; GitHub cancels
+additional jobs when that queue is full. Ordinary comments, non-owner events and
+Agent-marked replies are filtered before acquiring the lock. The script
+additionally requires a standalone command line. There is no periodic backlog
+scan: historical Issues need an owner event or manual dispatch. Keep the
+independent Hast schedule paused. Failed runs still require operator recovery.
 
 ## Verification and publication
 

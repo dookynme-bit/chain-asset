@@ -101,7 +101,7 @@ def eligible(issue):
 
 
 def owner_event(event, event_name, reviewer):
-    if event_name in {'workflow_dispatch', 'schedule'}:
+    if event_name == 'workflow_dispatch':
         return True
     issue, sender = event.get('issue', {}), event.get('sender', {})
     owner = issue.get('user', {})
@@ -141,6 +141,31 @@ def should_dispatch(record, digest, current_time, cooldown, force=False, dry_run
     if record and current_time - timestamp(record['started_at']) < cooldown:
         return False
     return True
+
+
+def automatic_input(issue, record, reviewer, cooldown):
+    """Coalesce owner changes during cooldown, without a periodic backlog scan."""
+    deadline = time.monotonic() + cooldown
+    announced = False
+    while eligible(issue) and issue['user'].get('type') != 'Bot':
+        comments = paginate(f'/repos/{REPO}/issues/{issue["number"]}/comments')
+        digest = fingerprint(issue, comments, reviewer)
+        current_time = time.time()
+        if should_dispatch(record, digest, current_time, cooldown):
+            return issue, digest
+        # Completed unchanged inputs need no wait and no model call.
+        if not should_dispatch(record, digest, current_time + cooldown, cooldown):
+            return None
+        remaining = timestamp(record['started_at']) + cooldown - current_time
+        if remaining > cooldown or time.monotonic() + remaining > deadline + 1:
+            raise Failure('Review cooldown exceeds its bounded wait; operator recovery required.')
+        if not announced:
+            summary(f'Issue #{issue["number"]}: changed owner input queued until its 30-minute cooldown ends; no Agent call while waiting.')
+            announced = True
+        time.sleep(min(60, max(0, remaining)))
+        # Read the latest input again: rapid edits coalesce and closed Issues stop.
+        issue = github(f'/repos/{REPO}/issues/{issue["number"]}')
+    return None
 
 
 def state_path():
@@ -248,13 +273,20 @@ def prepare():
         for issue in issues:
             if not eligible(issue) or issue['user'].get('type') == 'Bot':
                 continue
-            comments = paginate(f'/repos/{REPO}/issues/{issue["number"]}/comments')
-            digest = fingerprint(issue, comments, reviewer)
-            if probe:
-                digest = 'probe:' + digest
             old = state['issues'].get(str(issue['number']))
-            if not should_dispatch(old, digest, time.time(), int(os.environ.get('REVIEW_COOLDOWN_SECONDS', '1800')), force, dry_run):
-                continue
+            cooldown = int(os.environ.get('REVIEW_COOLDOWN_SECONDS', '1800'))
+            if name != 'workflow_dispatch':
+                current = automatic_input(issue, old, reviewer, cooldown)
+                if current is None:
+                    continue
+                issue, digest = current
+            else:
+                comments = paginate(f'/repos/{REPO}/issues/{issue["number"]}/comments')
+                digest = fingerprint(issue, comments, reviewer)
+                if probe:
+                    digest = 'probe:' + digest
+                if not should_dispatch(old, digest, time.time(), cooldown, force, dry_run):
+                    continue
             run_id = os.environ['GITHUB_RUN_ID']
             plan = {'issue_number': issue['number'], 'fingerprint': digest,
                     'started_at': now(), 'status': 'pending', 'dry_run': dry_run,
