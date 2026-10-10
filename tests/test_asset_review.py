@@ -196,6 +196,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(review.extract_result(value)['outcome'], 'would-need-info')
         self.assertIsNone(review.extract_result({'content': 'HTTP 200. Completed.'}))
 
+    def test_identical_concatenated_results_are_tolerated_but_conflicts_fail(self):
+        text = 'ASSET_REVIEW_RESULT {"issue_number":9,"outcome":"skipped"}'
+        self.assertEqual(review.extract_result(text + text)['outcome'], 'skipped')
+        self.assertIsNone(review.extract_result(text + text.replace('skipped', 'draft-pr')))
+        self.assertEqual(review.extract_result('ASSET_REVIEW_RESULT\n{\n"issue_number":9,\n"outcome":"skipped"\n}')['issue_number'], 9)
+
     def test_result_must_belong_to_completed_runs_final_assistant_message(self):
         final = review.FinalResult()
         text = 'ASSET_REVIEW_RESULT {"issue_number":9,"outcome":"would-need-info"}'

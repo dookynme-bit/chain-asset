@@ -318,12 +318,18 @@ def extract_result(value):
             if result:
                 return result
     elif isinstance(value, str):
-        for line in value.splitlines():
-            if line.startswith(RESULT):
-                try:
-                    return json.loads(line[len(RESULT):])
-                except ValueError:
-                    pass
+        results = []
+        for match in re.finditer(r'\bASSET_REVIEW_RESULT\s+', value):
+            try:
+                result, _ = json.JSONDecoder().raw_decode(value[match.end():].lstrip())
+                if isinstance(result, dict):
+                    results.append(result)
+            except ValueError:
+                pass
+        # Some Hast transports concatenate the same final result twice.
+        # Identical repeats are safe; conflicting decisions are not accepted.
+        if results and len({canonical(result) for result in results}) == 1:
+            return results[0]
     return None
 
 
