@@ -6,8 +6,6 @@ on:
     types: [opened, edited, reopened]
   issue_comment:
     types: [created, edited]
-  schedule:
-    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       issue_number:
@@ -38,7 +36,7 @@ jobs:
       github.repository == 'subscan-explorer/chain-asset' &&
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'workflow_dispatch' || vars.ASSET_REVIEW_ENABLED == 'true') &&
-      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' ||
        (!github.event.issue.pull_request && github.event.sender.type != 'Bot' &&
         github.event.sender.id == github.event.issue.user.id &&
         (github.event_name != 'issue_comment' ||
@@ -48,11 +46,13 @@ jobs:
             contains(github.event.comment.body, '<!-- chain-asset-review:v1 '))))))
     runs-on: ubuntu-latest
     # Rejected comments never acquire this lock or evict a pending owner request.
-    # Hold it through terminal status; hourly scans recover superseded owner edits.
+    # Hold it through terminal status and queue eligible events without replacing them.
     concurrency:
       group: chain-asset-review
       cancel-in-progress: false
-    timeout-minutes: 40
+      queue: max
+    # Allow the 30-minute cooldown plus the bounded review and stop acknowledgement.
+    timeout-minutes: 70
     environment: chain-assets
     env:
       GH_READ_TOKEN: ${{ github.token }}

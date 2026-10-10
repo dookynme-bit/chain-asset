@@ -96,6 +96,45 @@ class TriggerTests(unittest.TestCase):
         self.assertTrue(review.should_dispatch(record, 'a', started + 1800, 1800))
         self.assertFalse(review.should_dispatch(record, 'a', started + 1800, 1800, dry_run=True))
 
+    def test_cooldown_owner_edit_is_deferred_and_latest_input_is_used(self):
+        record = {'started_at': '2026-10-10T10:00:00Z', 'fingerprint': 'old', 'status': 'completed'}
+        started = review.timestamp(record['started_at'])
+        latest = copy.deepcopy(self.issue)
+        latest['body'] += '\nCorrected metadata during cooldown'
+        comments = [self.event['comment']]
+        with patch.object(review, 'paginate', side_effect=[[], comments]), \
+                patch.object(review, 'github', return_value=latest) as github, \
+                patch.object(review.time, 'time', side_effect=[started + 1799, started + 1800]), \
+                patch.object(review.time, 'monotonic', return_value=100), \
+                patch.object(review.time, 'sleep') as sleep, patch.object(review, 'summary'):
+            issue, digest = review.automatic_input(self.issue, record, 'reviewer', 1800)
+        sleep.assert_called_once_with(1)
+        github.assert_called_once_with(f'/repos/{review.REPO}/issues/9')
+        self.assertEqual(issue, latest)
+        self.assertEqual(digest, review.fingerprint(latest, comments, 'reviewer'))
+
+    def test_completed_unchanged_input_does_not_wait(self):
+        record = {'started_at': '2026-10-10T10:00:00Z',
+                  'fingerprint': review.fingerprint(self.issue, [], 'reviewer'), 'status': 'completed'}
+        with patch.object(review, 'paginate', return_value=[]), \
+                patch.object(review.time, 'time', return_value=review.timestamp(record['started_at']) + 1), \
+                patch.object(review.time, 'sleep') as sleep, patch.object(review, 'github') as github:
+            self.assertIsNone(review.automatic_input(self.issue, record, 'reviewer', 1800))
+        sleep.assert_not_called()
+        github.assert_not_called()
+
+    def test_issue_closed_during_cooldown_does_not_dispatch(self):
+        record = {'started_at': '2026-10-10T10:00:00Z', 'fingerprint': 'old', 'status': 'completed'}
+        closed = copy.deepcopy(self.issue)
+        closed['state'] = 'closed'
+        with patch.object(review, 'paginate', return_value=[]), \
+                patch.object(review, 'github', return_value=closed), \
+                patch.object(review.time, 'time', return_value=review.timestamp(record['started_at']) + 1799), \
+                patch.object(review.time, 'monotonic', return_value=100), \
+                patch.object(review.time, 'sleep') as sleep, patch.object(review, 'summary'):
+            self.assertIsNone(review.automatic_input(self.issue, record, 'reviewer', 1800))
+        sleep.assert_called_once_with(1)
+
 
 class ProtocolTests(unittest.TestCase):
     def test_latest_state_uses_creation_time_not_artifact_id(self):
