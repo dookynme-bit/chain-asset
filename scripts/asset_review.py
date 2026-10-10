@@ -351,6 +351,16 @@ def verify_result(result, plan, reviewer):
     if not isinstance(result, dict) or result.get('issue_number') != plan['issue_number']:
         raise Failure('Agent ended without the structured result for the requested Issue.')
     outcome = result.get('outcome')
+    if outcome == 'skipped' and not plan.get('connectivity_check'):
+        # A model's assertion of "skipped" cannot silently turn an unreviewed
+        # eligible request green. Confirm a real deduplication/closure reason.
+        issue = github(f'/repos/{REPO}/issues/{plan["issue_number"]}')
+        if eligible(issue):
+            comments = paginate(f'/repos/{REPO}/issues/{plan["issue_number"]}/comments')
+            marker = MARKER + f'input-sha256={plan["fingerprint"]} '
+            if not any(item.get('user', {}).get('login') == reviewer and
+                       marker in (item.get('body') or '') for item in comments):
+                raise Failure('Skipped review has no matching authenticated prior outcome; operator review required.')
     if plan['dry_run']:
         if outcome not in {'would-need-info', 'would-draft-pr', 'skipped'} or result.get('comment_url') or result.get('pr_url'):
             raise Failure('Dry-run result did not respect the no-write contract.')
@@ -360,7 +370,8 @@ def verify_result(result, plan, reviewer):
         if not match:
             raise Failure('Missing verified Issue comment URL.')
         comment = github(f'/repos/{REPO}/issues/comments/{match[1]}')
-        if (comment['user']['login'] != reviewer or MARKER not in (comment.get('body') or '') or
+        marker = MARKER + f'input-sha256={plan["fingerprint"]} outcome=needs-info -->'
+        if (comment['user']['login'] != reviewer or marker not in (comment.get('body') or '') or
                 comment.get('html_url') != result['comment_url']):
             raise Failure('Review comment identity/marker verification failed.')
     elif outcome == 'draft-pr':
@@ -403,6 +414,12 @@ def request_payload(plan):
         prompt += (' This authenticated maintainer dispatch explicitly overrides cooldown and previous-input '
                    'deduplication for this one review. All provenance, scam, safety and build gates still apply. '
                    'Reuse an existing matching draft PR; never duplicate a previously published identical reply.')
+    if not plan.get('connectivity_check'):
+        prompt += (f' The authenticated dispatcher fingerprint is {plan["fingerprint"]}. Use that exact value '
+                   'in the input-sha256 marker of your public outcome comment. Check current title/body and '
+                   'owner command comments for changes before writing. Dry-run completion is not a previously '
+                   'published outcome. If you return skipped, there must be a matching authenticated public '
+                   'outcome marker for that fingerprint, or the Issue must have become closed/ineligible.')
     return {'session_id': plan['session_id'], 'request_id': plan['request_id'], 'prompt': prompt,
                'context': {'source': 'github-actions', 'repository': REPO, 'issue_number': number,
                            'trigger_fingerprint': plan['fingerprint'], 'run_id': plan['run_id']}}
