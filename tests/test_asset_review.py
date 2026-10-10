@@ -5,6 +5,8 @@ import http.client
 import io
 import json
 import tempfile
+import urllib.error
+import zipfile
 from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
@@ -96,6 +98,39 @@ class TriggerTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_latest_state_uses_creation_time_not_artifact_id(self):
+        artifacts = [{'id': 99, 'created_at': '2026-10-10T10:00:00Z', 'workflow_run': {'id': 1, 'head_branch': 'main'}},
+                     {'id': 88, 'created_at': '2026-10-10T11:00:00Z', 'workflow_run': {'id': 2, 'head_branch': 'main'}}]
+        state = {'version': 1, 'repository': review.REPO, 'issues': {'9': {'status': 'completed'}}}
+        blob = io.BytesIO()
+        with zipfile.ZipFile(blob, 'w') as archive:
+            archive.writestr('state.json', json.dumps(state))
+        download = MagicMock()
+        download.__enter__.return_value = io.BytesIO(blob.getvalue())
+        redirect = urllib.error.HTTPError('https://api.github.com', 302, 'Found', {'Location': 'https://example.com/archive'}, None)
+        with patch.object(review, 'github', side_effect=[{'artifacts': artifacts},
+                {'path': review.WORKFLOW, 'head_repository': {'full_name': review.REPO}}]) as github, patch.object(review.OPENER, 'open', side_effect=[redirect, download]) as opener, patch.dict(os.environ, {'GH_READ_TOKEN': 'read-token'}):
+            self.assertEqual(review.load_state(), state)
+            self.assertTrue(github.call_args.args[0].endswith('/runs/2'))
+            self.assertIn('/artifacts/88/zip', opener.call_args_list[0].args[0].full_url)
+
+    def test_existing_completed_session_is_replayed_without_created_request(self):
+        frames = ('id: 1\nevent: message.completed\ndata: {"type":"message.completed","run_id":"r","data":{"role":"assistant","message_id":"m","text":'
+                  '"ASSET_REVIEW_RESULT {\\"issue_number\\":9,\\"outcome\\":\\"skipped\\"}"}}\n\n'
+                  'id: 2\nevent: run.completed\ndata: {"type":"run.completed","run_id":"r","data":{"final_message_id":"m"}}\n\n')
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'REVIEW_STATE_DIR': folder,
+                'HAST_AGENT_URL': 'https://aip.hast.so/api/call?secret=abc', 'REVIEWER_LOGIN': 'reviewer'}):
+            plan = {'issue_number': 9, 'dry_run': True, 'connectivity_check': True, 'fingerprint': 'f', 'status': 'pending',
+                    'started_at': '2000-01-01T00:00:00Z', 'recovery': True, 'session_id': 's', 'request_id': 'q', 'run_id': '1'}
+            review.save_state({'issues': {'9': plan}})
+            (Path(folder) / 'plan.json').write_text(json.dumps(plan))
+            with patch.object(review, 'hook') as hook, patch.object(review, 'summary'):
+                hook.return_value.__enter__.return_value = frames.encode().splitlines(keepends=True)
+                review.execute()
+                self.assertEqual(hook.call_count, 1)
+                self.assertEqual(hook.call_args.args[1], 'sse')
+            self.assertEqual(json.loads((Path(folder) / 'state.json').read_text())['issues']['9']['status'], 'completed')
+
     def test_operator_report_redacts_urls_credentials_and_unbroken_identifiers(self):
         secret = 'github_pat_' + 'x' * 70
         value = 'Blocked: missing permission.\nhttps://aip.hast.so/call?secret=abc\n' + secret + '\n' + 'y' * 40 + '\nAuthorization: Bearer short-secret'
