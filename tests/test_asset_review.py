@@ -147,10 +147,27 @@ class ProtocolTests(unittest.TestCase):
     def test_comment_result_requires_returned_author_and_marker(self):
         result = {'issue_number': 9, 'outcome': 'needs-info',
                   'comment_url': f'https://github.com/{review.REPO}/issues/9#issuecomment-10'}
-        with patch.object(review, 'github', return_value={'user': {'login': 'attacker'}, 'body': review.MARKER}), self.assertRaises(review.Failure):
-            review.verify_result(result, {'issue_number': 9, 'dry_run': False}, 'reviewer')
-        with patch.object(review, 'github', return_value={'user': {'login': 'reviewer'}, 'body': review.MARKER, 'html_url': result['comment_url']}):
-            self.assertEqual(review.verify_result(result, {'issue_number': 9, 'dry_run': False}, 'reviewer')['outcome'], 'needs-info')
+        plan = {'issue_number': 9, 'dry_run': False, 'fingerprint': 'f'}
+        marker = review.MARKER + 'input-sha256=f outcome=needs-info -->'
+        for login, body in [('attacker', marker), ('reviewer', review.MARKER),
+                            ('reviewer', marker.replace('sha256=f ', 'sha256=old '))]:
+            with patch.object(review, 'github', return_value={'user': {'login': login}, 'body': body, 'html_url': result['comment_url']}), self.assertRaises(review.Failure):
+                review.verify_result(result, plan, 'reviewer')
+        with patch.object(review, 'github', return_value={'user': {'login': 'reviewer'}, 'body': marker, 'html_url': result['comment_url']}):
+            self.assertEqual(review.verify_result(result, plan, 'reviewer')['outcome'], 'needs-info')
+
+    def test_skipped_requires_matching_public_outcome_not_model_assertion(self):
+        plan = {'issue_number': 9, 'dry_run': False, 'fingerprint': 'f'}
+        result = {'issue_number': 9, 'outcome': 'skipped'}
+        issue = {'state': 'open', 'labels': [{'name': 'update-request'}]}
+        with patch.object(review, 'github', return_value=issue), patch.object(review, 'paginate', return_value=[]), self.assertRaises(review.Failure):
+            review.verify_result(result, plan, 'reviewer')
+        comments = [{'user': {'login': 'reviewer'}, 'body': review.MARKER + 'input-sha256=f outcome=needs-info -->'}]
+        with patch.object(review, 'github', return_value=issue), patch.object(review, 'paginate', return_value=comments):
+            self.assertEqual(review.verify_result(result, plan, 'reviewer')['outcome'], 'skipped')
+        plan['dry_run'] = True
+        plan['connectivity_check'] = True
+        self.assertEqual(review.verify_result(result, plan, 'reviewer')['outcome'], 'skipped')
 
     def test_asset_pr_rejects_non_draft_and_workflow_edits(self):
         result = {'issue_number': 9, 'outcome': 'draft-pr', 'pr_url': f'https://github.com/{review.REPO}/pull/10'}
