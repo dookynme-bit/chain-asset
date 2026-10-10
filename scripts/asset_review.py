@@ -34,6 +34,12 @@ class Failure(Exception):
     """Safe messages only: never include request URLs, headers or response text."""
 
 
+class HookHTTPFailure(Failure):
+    def __init__(self, action, status):
+        self.status = status
+        super().__init__(f'Hast {action} request returned HTTP {status}; credential URL omitted.')
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -148,8 +154,11 @@ def save_state(state):
 
 
 def load_state():
-    result = github(f'/repos/{REPO}/actions/artifacts?name=asset-review-state&per_page=10')
-    for artifact in result['artifacts']:
+    result = github(f'/repos/{REPO}/actions/artifacts?name=asset-review-state&per_page=100')
+    # Live GitHub responses were ordered by IDs which were not monotonic with
+    # creation time. Overwritten outcome artifacts must beat older pending ones.
+    artifacts = sorted(result['artifacts'], key=lambda item: timestamp(item['created_at']), reverse=True)
+    for artifact in artifacts:
         run = artifact.get('workflow_run') or {}
         if artifact.get('expired') or run.get('head_branch') != 'main':
             continue
@@ -220,6 +229,7 @@ def prepare():
         if len(pending) != 1:
             raise Failure('More than one unfinished Agent run; operator recovery required.')
         plan = pending[0]
+        plan['recovery'] = True
         summary(f'Recovering the unfinished run for Issue #{plan["issue_number"]}; no new run will be created.')
     else:
         inputs = event.get('inputs') or {}
@@ -282,7 +292,7 @@ def hook(url, action, payload, timeout=30):
     try:
         return OPENER.open(request, timeout=timeout)
     except urllib.error.HTTPError as error:
-        raise Failure(f'Hast {action} request returned HTTP {error.code}; credential URL omitted.') from None
+        raise HookHTTPFailure(action, error.code) from None
     except (urllib.error.URLError, TimeoutError, socket.timeout):
         raise Failure(f'Hast {action} transport failed; inspect/recover this session before creating another.') from None
 
@@ -446,10 +456,27 @@ def execute():
     budget = 180 if plan.get('connectivity_check') else 1800
     remaining = max(0, budget - (time.time() - timestamp(plan['started_at'])))
     deadline, stop_deadline = time.monotonic() + remaining, None
+    existing_stream = None
     try:
-        # Same session/request/content on recovery; never create a second run on a timeout.
-        with hook(url, 'created', payload) as response:
-            response.read(MAX_BYTES)
+        # Read an existing session before resending a recovered message. Hast
+        # may reject created after Agent configuration changed, even when the
+        # external payload is identical. Existing SSE does not dispatch work.
+        if plan.get('recovery') or plan.get('accepted'):
+            try:
+                existing_stream = hook(url, 'sse', {'session_id': plan['session_id'], 'after_event_id': after}, 60)
+            except HookHTTPFailure as error:
+                if error.status != 404:
+                    raise
+        if existing_stream is None:
+            with hook(url, 'created', payload) as response:
+                response.read(MAX_BYTES)
+        elif remaining == 0:
+            # A short replay grace lets an already-completed historical session
+            # release stale pending state before requesting a stop.
+            deadline = time.monotonic() + 10
+        plan['accepted'] = True
+        state['issues'][str(number)] = plan
+        save_state(state)
         while terminal is None:
             if stop_deadline is None and (time.monotonic() >= deadline or plan.get('input_requested')):
                 with hook(url, 'prompted', {'session_id': plan['session_id'], 'signal': 'stop'}) as response:
@@ -461,7 +488,8 @@ def execute():
             if time.monotonic() >= active_deadline:
                 break
             try:
-                with hook(url, 'sse', {'session_id': plan['session_id'], 'after_event_id': after}, 60) as response:
+                with (existing_stream or hook(url, 'sse', {'session_id': plan['session_id'], 'after_event_id': after}, 60)) as response:
+                    existing_stream = None
                     for frame in sse_frames(response, active_deadline):
                         if time.monotonic() > active_deadline:
                             break
