@@ -42,9 +42,26 @@ A single global concurrency group waits for actual Agent terminal status on
 eligible jobs only. `queue: max` preserves up to 100 pending jobs; GitHub cancels
 additional jobs when that queue is full. Ordinary comments, non-owner events and
 Agent-marked replies are filtered before acquiring the lock. The script
-additionally requires a standalone command line. There is no periodic backlog
-scan: historical Issues need an owner event or manual dispatch. Keep the
-independent Hast schedule paused. Failed runs still require operator recovery.
+additionally requires a standalone command line. GitHub has no periodic backlog
+scan; its automatic reviews are driven by owner events. Failed runs still require
+operator recovery.
+
+## AIP fallback schedule
+
+The existing Hast task `Asset 请求每12小时兜底巡检` is enabled with
+`0 0,12 * * *` in `Asia/Shanghai`, at 00:00 and 12:00 Beijing time. It uses
+`Subscan Asset 审核助手` and does not send routine results to a channel. Each run
+checks open requests and processes at most one unreviewed or changed input;
+no pending work produces only an entry in the execution log. Each scheduled
+scan invokes the model, even when no Issue requires publication.
+
+The schedule requires the same input fingerprint, trusted public outcome
+markers, existing-PR checks, 30-minute cooldown and Scam/evidence/build gates as
+event-triggered reviews. It checks public GitHub workflow status before reviewing
+and again before publication, and skips when a review is queued or active or
+that status cannot be verified. These checks reduce competing writes, but AIP
+does not acquire GitHub's concurrency lock. Strict cross-platform serialization
+would require routing both entry points through a shared dispatcher.
 
 ## Verification and publication
 
