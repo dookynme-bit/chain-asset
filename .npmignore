@@ -2,6 +2,9 @@ logos/*
 assets/*
 networks/*
 .github/*
+.codex/
+scripts/
+tests/
 .parcel-cache/*
 categories.json
 networks.json
